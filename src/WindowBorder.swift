@@ -37,6 +37,8 @@ private enum SkyLight {
     static let setWindowShadowProperties = load("SLSWindowSetShadowProperties", (@convention(c) (UInt32, CFDictionary) -> CGError).self)
     static let windowContextCreate = load("SLWindowContextCreate", (@convention(c) (Int32, UInt32, CFDictionary?) -> Unmanaged<CGContext>?).self)
     static let flushWindowContentRegion = load("SLSFlushWindowContentRegion", (@convention(c) (Int32, UInt32, UnsafeMutableRawPointer?) -> CGError).self)
+    static let windowFreeze = load("SLSWindowFreezeWithOptions", (@convention(c) (Int32, UInt32, CFTypeRef?) -> CGError).self)
+    static let windowThaw = load("SLSWindowThaw", (@convention(c) (Int32, UInt32) -> CGError).self)
     static let disableUpdate = load("SLSDisableUpdate", (@convention(c) (Int32) -> CGError).self)
     static let reenableUpdate = load("SLSReenableUpdate", (@convention(c) (Int32) -> CGError).self)
     static let moveWindowsToManagedSpace = load("SLSMoveWindowsToManagedSpace", (@convention(c) (Int32, CFArray, UInt64) -> CGError).self)
@@ -60,7 +62,8 @@ private enum SkyLight {
             mainConnectionID, newConnection, registerNotifyProc, requestNotificationsForWindows, getActiveSpace,
             copySpacesForWindows, getWindowBounds, windowIsOrderedIn, newRegionWithRect, newWindow, releaseWindow,
             setWindowTags, setWindowShape, setWindowResolution, setWindowOpacity, setWindowShadowProperties,
-            windowContextCreate, flushWindowContentRegion, disableUpdate, reenableUpdate, moveWindowsToManagedSpace,
+            windowContextCreate, flushWindowContentRegion, windowFreeze, windowThaw, disableUpdate, reenableUpdate,
+            moveWindowsToManagedSpace,
             transactionCreate, transactionCommit, transactionMoveWindowWithGroup, transactionOrderWindow,
             transactionSetWindowLevel, windowQueryWindows, windowQueryResultCopyWindows, windowIteratorAdvance,
             windowIteratorGetLevel,
@@ -136,6 +139,7 @@ final class WindowBorder {
     private var needsRedraw = true
 
     private var target: UInt32 = 0
+    private var targetSpace: UInt64?  // Looked up on focus changes, not on every resize
     private var targetRadius: CGFloat = 9
     private var targetLevel: Int32 = 0
 
@@ -158,7 +162,7 @@ final class WindowBorder {
                 move()
                 return
             case .resize, .level, .unhide:
-                update()
+                scheduleUpdate()
                 return
             case .hide, .close, .destroy:
                 hide()
@@ -192,6 +196,19 @@ final class WindowBorder {
             _ = registerNotifyProc(windowEventHandler, event.rawValue, nil)
         }
         isRegistered = true
+    }
+
+    // A live resize sends events faster than the border can be redrawn at full size. Handling
+    // them all would leave it working through stale sizes; this jumps to the latest one.
+    private var updatePending = false
+
+    private func scheduleUpdate() {
+        guard !updatePending else { return }
+        updatePending = true
+        DispatchQueue.main.async { [weak self] in
+            self?.updatePending = false
+            self?.update()
+        }
     }
 
     // Focus events come in bursts, and the window list lags them slightly
@@ -229,6 +246,7 @@ final class WindowBorder {
             readTargetDetails()
             needsRedraw = true
         }
+        targetSpace = spaceOf(target)
         update()
     }
 
@@ -308,6 +326,8 @@ final class WindowBorder {
     }
 
     private func update() {
+        let started = debug ? CACurrentMediaTime() : 0
+        defer { if debug { print(String(format: "update %.2f ms", (CACurrentMediaTime() - started) * 1000)) } }
         guard width > 0, target != 0, let bounds = targetBounds() else {
             hide()
             return
@@ -322,15 +342,25 @@ final class WindowBorder {
         let newFrame = borderFrame(around: bounds)
         if borderID == 0 {
             createWindow(size: newFrame.size)
-        } else if newFrame.size != frame.size {
-            reshape(to: newFrame.size)
+            guard borderID != 0 else { return }
+            frame = CGRect(origin: CGPoint(x: -9999, y: -9999), size: newFrame.size)
+        }
+
+        // Shape, drawing and position have to reach the screen together. Shown one at a time, the
+        // border flashes at its new size in the wrong place, plain to see when a window is resized
+        // from its left edge.
+        _ = SkyLight.disableUpdate?(connection)
+        if newFrame.size != frame.size, let region = region(of: newFrame.size) {
+            // Frozen, so the reshaped window is not shown until it has been redrawn
+            _ = SkyLight.windowFreeze?(connection, borderID, nil)
+            // The offset is where the reshaped window goes; 0, 0 would be the screen's corner
+            _ = SkyLight.setWindowShape?(connection, borderID, Float(newFrame.minX), Float(newFrame.minY), region)
+            needsRedraw = true
         }
         frame = newFrame
-        guard borderID != 0 else { return }
-
         if needsRedraw { draw() }
 
-        if let targetSpace = spaceOf(target), targetSpace != space {
+        if let targetSpace = targetSpace, targetSpace != space {
             _ = SkyLight.moveWindowsToManagedSpace?(connection, [NSNumber(value: borderID)] as CFArray, targetSpace)
             space = targetSpace
         }
@@ -341,6 +371,7 @@ final class WindowBorder {
             // -1: directly below the target, so only the part outside the window shows
             _ = SkyLight.transactionOrderWindow?(transaction, borderID, -1, target)
         }
+        _ = SkyLight.reenableUpdate?(connection)
         isShown = true
     }
 
@@ -402,15 +433,6 @@ final class WindowBorder {
         needsRedraw = true
     }
 
-    private func reshape(to size: CGSize) {
-        guard let region = region(of: size) else { return }
-        _ = SkyLight.disableUpdate?(connection)
-        _ = SkyLight.setWindowShape?(connection, borderID, 0, 0, region)
-        frame.size = size
-        draw()
-        _ = SkyLight.reenableUpdate?(connection)
-    }
-
     private func draw() {
         guard let context = context else { return }
         needsRedraw = false
@@ -431,6 +453,7 @@ final class WindowBorder {
         context.restoreGState()
         context.flush()
         _ = SkyLight.flushWindowContentRegion?(connection, borderID, nil)
+        _ = SkyLight.windowThaw?(connection, borderID)
     }
 
     // Dynamic colors such as the accent color need resolving before they reach Core Graphics
