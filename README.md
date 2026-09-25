@@ -8,7 +8,7 @@ rounded square that matches your accent color, or any color you pick.
 ## Features
 - Shows the current desktop number in the menu bar
 - Updates instantly when switching desktops
-- With more than one display, desktops are numbered per display, next to an outlined display number: `[2] 1` is the first desktop on display 2
+- With more than one display, shows each display's desktop, numbered per display and main display first. The focused display's box is filled, the others are outlined, and every menu bar shows the same thing (macOS mirrors one menu bar item onto all of them)
 - Pick a color (accent, transparent, gray, red, orange, yellow, green, blue, purple, pink), size (small, medium, large) and font (typeface, text size, bold) from its menu
 - The same size on every display, whatever the menu bar height
 - Menu bar only: no Dock icon, minimal resource usage

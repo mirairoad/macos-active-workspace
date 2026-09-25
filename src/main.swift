@@ -111,16 +111,22 @@ private enum TextSize: String, CaseIterable {
     }
 }
 
-// One number in its box: as wide as it is tall, or wider when the number needs it
+// What one display is showing: its current desktop number, or "F" for a full-screen app
+private struct DisplayState {
+    let label: String
+    let isFocused: Bool
+}
+
+// One label in its box: as wide as it is tall, or wider when the label needs it
 private struct Label {
     let text: NSAttributedString
     let font: NSFont
     let textWidth: CGFloat
     let width: CGFloat
 
-    init(_ number: Int, font: NSFont, color: NSColor, height: CGFloat, padding: CGFloat) {
+    init(_ string: String, font: NSFont, color: NSColor, height: CGFloat, padding: CGFloat) {
         self.font = font
-        text = NSAttributedString(string: "\(number)", attributes: [.font: font, .foregroundColor: color])
+        text = NSAttributedString(string: string, attributes: [.font: font, .foregroundColor: color])
         textWidth = ceil(text.size().width)
         width = max(height, textWidth + padding)
     }
@@ -136,8 +142,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var updateTimer: Timer?
     private var lastActiveSpace: Int32 = 0  // Add this to track the last space
-    private var currentDesktop = 1
-    private var currentMonitor: Int?  // Only set when more than one display has its own desktops
+    private var currentDisplays = [DisplayState(label: "1", isFocused: true)]
     // The pre-Workit label, kept so settings carry over from earlier installs
     private let defaults = UserDefaults(suiteName: "com.workspace.monitor") ?? .standard
     private let colorMenu = NSMenu()
@@ -146,7 +151,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let backgroundAlpha: CGFloat = 0.8
     private let cornerRadius: CGFloat = 3
     private let horizontalPadding: CGFloat = 6  // 3 points on each side
-    private let gap: CGFloat = 3  // Between the display number and the desktop number
+    private let gap: CGFloat = 3  // Between the boxes of different displays
     private let borderWidth: CGFloat = 1.25
 
     private var indicatorColor: IndicatorColor {
@@ -380,53 +385,73 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
     
-    private func updateButtonAppearance(desktop: Int, monitor: Int?) {
-        currentDesktop = desktop
-        currentMonitor = monitor
+    private func updateButtonAppearance(displays: [DisplayState]) {
+        currentDisplays = displays
         redraw()
     }
 
     private func redraw() {
-        statusItem.button?.image = indicatorImage(desktop: currentDesktop, monitor: currentMonitor)
+        statusItem.button?.image = indicatorImage(displays: currentDisplays)
     }
 
     // Draw at a fixed point size so the indicator looks the same on every display,
-    // instead of stretching to the menu bar height
-    private func indicatorImage(desktop: Int, monitor: Int?) -> NSImage {
+    // instead of stretching to the menu bar height.
+    //
+    // macOS draws a status item once and mirrors that image onto every display's menu bar, so
+    // each display cannot show its own desktop. Instead every display gets a box, main display
+    // first: the focused one filled, the others outlined. That reads the same on every menu bar.
+    private func indicatorImage(displays: [DisplayState]) -> NSImage {
         let fill = indicatorColor.fill
         let height = min(indicatorSize.height, NSStatusBar.system.thickness - 2)
         let font = indicatorFont.font(ofSize: round(height * textSize.scale), weight: isBold ? .bold : .regular)
         // Template images only use alpha, so black stands in for whatever the menu bar needs
         let ink = fill ?? .black
-        let desktopLabel = Label(desktop, font: font, color: fill.map { contrastingTextColor(for: $0) } ?? .black,
-                                 height: height, padding: horizontalPadding)
-        let monitorLabel = monitor.map { Label($0, font: font, color: ink, height: height, padding: horizontalPadding) }
-        let desktopX = monitorLabel.map { $0.width + gap } ?? 0
+        let filledText = fill.map { contrastingTextColor(for: $0) } ?? .black
+        // With a single display there is nothing to tell apart, so it keeps the plain look
+        let showFocus = displays.count > 1
+        let boxes = displays.map { display -> (filled: Bool, label: Label) in
+            let filled = display.isFocused || !showFocus
+            let label = Label(display.label, font: font, color: filled ? filledText : ink,
+                              height: height, padding: horizontalPadding)
+            return (filled, label)
+        }
+        let width = boxes.map { $0.label.width }.reduce(0, +) + gap * CGFloat(max(boxes.count - 1, 0))
         let radius = cornerRadius
         let alpha = backgroundAlpha
         let lineWidth = borderWidth
+        let spacing = gap
 
-        let size = NSSize(width: desktopX + desktopLabel.width, height: height)
-        let image = NSImage(size: size, flipped: false) { _ in
-            // The display number is outlined rather than filled, so it reads as the secondary one
-            if let monitorLabel = monitorLabel {
-                let box = NSRect(x: 0, y: 0, width: monitorLabel.width, height: height)
-                let border = NSBezierPath(roundedRect: box.insetBy(dx: lineWidth / 2, dy: lineWidth / 2),
-                                          xRadius: radius, yRadius: radius)
-                border.lineWidth = lineWidth
-                ink.setStroke()
-                border.stroke()
-                monitorLabel.draw(in: box)
+        let image = NSImage(size: NSSize(width: width, height: height), flipped: false) { _ in
+            var x: CGFloat = 0
+            for (filled, label) in boxes {
+                let box = NSRect(x: x, y: 0, width: label.width, height: height)
+                let shape = NSBezierPath(roundedRect: box, xRadius: radius, yRadius: radius)
+                if !filled {
+                    let border = NSBezierPath(roundedRect: box.insetBy(dx: lineWidth / 2, dy: lineWidth / 2),
+                                              xRadius: radius, yRadius: radius)
+                    border.lineWidth = lineWidth
+                    ink.setStroke()
+                    border.stroke()
+                    label.draw(in: box)
+                } else if let fill = fill {
+                    fill.withAlphaComponent(alpha).setFill()
+                    shape.fill()
+                    label.draw(in: box)
+                } else if showFocus {
+                    // Transparent: a solid box with the number cut out of it
+                    NSColor.black.setFill()
+                    shape.fill()
+                    NSGraphicsContext.current?.compositingOperation = .destinationOut
+                    label.draw(in: box)
+                    NSGraphicsContext.current?.compositingOperation = .sourceOver
+                } else {
+                    label.draw(in: box)
+                }
+                x += label.width + spacing
             }
-            let box = NSRect(x: desktopX, y: 0, width: desktopLabel.width, height: height)
-            if let fill = fill {
-                fill.withAlphaComponent(alpha).setFill()
-                NSBezierPath(roundedRect: box, xRadius: radius, yRadius: radius).fill()
-            }
-            desktopLabel.draw(in: box)
             return true
         }
-        // Lets macOS tint a bare number and outline for light and dark menu bars
+        // Lets macOS tint template drawing for light and dark menu bars
         image.isTemplate = fill == nil
         return image
     }
@@ -444,24 +469,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard activeSpace != lastActiveSpace else { return }
         lastActiveSpace = activeSpace
 
-        let displays = CGSCopyManagedDisplaySpaces(conn) as! [NSDictionary]
         // Desktops are numbered per display, as Mission Control does, with displays in the order
         // macOS lists them (main display first). Full-screen apps get spaces of their own, which
-        // are not desktops and are skipped.
-        for (displayIndex, display) in displays.enumerated() {
-            guard let spaces = display["Spaces"] as? [[String: Any]] else { continue }
+        // are not desktops: they are skipped in the numbering and shown as "F".
+        let displays = CGSCopyManagedDisplaySpaces(conn) as! [NSDictionary]
+        let states = displays.compactMap { display -> DisplayState? in
+            guard let current = (display["Current Space"] as? [String: Any])?["ManagedSpaceID"] as? Int,
+                  let spaces = display["Spaces"] as? [[String: Any]] else { return nil }
             let desktops = spaces.filter { $0["TileLayoutManager"] == nil }
-            guard let index = desktops.firstIndex(where: { ($0["ManagedSpaceID"] as? Int) == Int(activeSpace) }) else {
-                continue
-            }
+            let index = desktops.firstIndex { ($0["ManagedSpaceID"] as? Int) == current }
+            return DisplayState(label: index.map { "\($0 + 1)" } ?? "F", isFocused: current == Int(activeSpace))
+        }
+        guard !states.isEmpty else { return }
 
-            // A single list means one display, or displays sharing Spaces: nothing to tell apart
-            let monitor = displays.count > 1 ? displayIndex + 1 : nil
-            print("Switched to Space Number: \(index + 1) on display \(displayIndex + 1)")
-            DispatchQueue.main.async { [weak self] in
-                self?.updateButtonAppearance(desktop: index + 1, monitor: monitor)
-            }
-            return
+        print("Desktops: " + states.map { $0.isFocused ? "[\($0.label)]" : $0.label }.joined(separator: " "))
+        DispatchQueue.main.async { [weak self] in
+            self?.updateButtonAppearance(displays: states)
         }
     }
 
