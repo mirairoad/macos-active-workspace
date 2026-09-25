@@ -53,6 +53,10 @@ private enum SkyLight {
     static let windowQueryResultCopyWindows = load("SLSWindowQueryResultCopyWindows", (@convention(c) (CFTypeRef) -> Unmanaged<CFTypeRef>?).self)
     static let windowIteratorAdvance = load("SLSWindowIteratorAdvance", (@convention(c) (CFTypeRef) -> Bool).self)
     static let windowIteratorGetLevel = load("SLSWindowIteratorGetLevel", (@convention(c) (CFTypeRef) -> Int32).self)
+    static let windowIteratorGetWindowID = load("SLSWindowIteratorGetWindowID", (@convention(c) (CFTypeRef) -> UInt32).self)
+    static let windowIteratorGetParentID = load("SLSWindowIteratorGetParentID", (@convention(c) (CFTypeRef) -> UInt32).self)
+    static let windowIteratorGetTags = load("SLSWindowIteratorGetTags", (@convention(c) (CFTypeRef) -> UInt64).self)
+    static let windowIteratorGetAttributes = load("SLSWindowIteratorGetAttributes", (@convention(c) (CFTypeRef) -> UInt64).self)
     // macOS 26 and later only: windows there have different corner radii by kind
     static let windowIteratorGetCornerRadii = load("SLSWindowIteratorGetCornerRadii", (@convention(c) (CFTypeRef) -> Unmanaged<CFArray>?).self)
 
@@ -66,7 +70,8 @@ private enum SkyLight {
             moveWindowsToManagedSpace,
             transactionCreate, transactionCommit, transactionMoveWindowWithGroup, transactionOrderWindow,
             transactionSetWindowLevel, windowQueryWindows, windowQueryResultCopyWindows, windowIteratorAdvance,
-            windowIteratorGetLevel,
+            windowIteratorGetLevel, windowIteratorGetWindowID, windowIteratorGetParentID, windowIteratorGetTags,
+            windowIteratorGetAttributes,
         ]
         return required.allSatisfy { $0 != nil }
     }
@@ -230,7 +235,9 @@ final class WindowBorder {
         }
         register()
 
-        let windows = normalWindowsOnScreen()
+        let listed = normalWindowsOnScreen()
+        let topLevel = topLevelWindows(among: listed.map { $0.id })
+        let windows = listed.filter { topLevel.contains($0.id) }
         // Asking for notifications on every visible window, not just the focused one, is what
         // reveals focus moving between two windows of the same app
         watch(windows.map { $0.id })
@@ -270,6 +277,30 @@ final class WindowBorder {
                   bounds.width >= 40, bounds.height >= 40 else { return nil }
             return ListedWindow(id: id, pid: pid)
         }
+    }
+
+    // Real windows, as opposed to the popups, dropdowns and tooltips apps attach to them (such as
+    // a browser's address bar suggestions): no parent, not attached, not left out of window
+    // cycling, and a document window or a modal panel. The same test yabai and JankyBorders use.
+    private func topLevelWindows(among ids: [UInt32]) -> Set<UInt32> {
+        guard !ids.isEmpty,
+              let query = SkyLight.windowQueryWindows?(mainConnection, ids.map { NSNumber(value: $0) } as CFArray, 0)?.takeRetainedValue(),
+              let iterator = SkyLight.windowQueryResultCopyWindows?(query)?.takeRetainedValue() else { return [] }
+
+        let document: UInt64 = 1 << 0, floating: UInt64 = 1 << 1, attached: UInt64 = 1 << 7
+        let ignoresCycle: UInt64 = 1 << 18, modal: UInt64 = 1 << 31, visibleTag: UInt64 = 1 << 58
+        var result = Set<UInt32>()
+        while SkyLight.windowIteratorAdvance?(iterator) == true {
+            let tags = SkyLight.windowIteratorGetTags?(iterator) ?? 0
+            let attributes = SkyLight.windowIteratorGetAttributes?(iterator) ?? 0
+            guard SkyLight.windowIteratorGetParentID?(iterator) == 0,
+                  attributes & 0x2 != 0 || tags & visibleTag != 0,
+                  tags & (attached | ignoresCycle) == 0,
+                  tags & document != 0 || tags & (floating | modal) == floating | modal,
+                  let id = SkyLight.windowIteratorGetWindowID?(iterator) else { continue }
+            result.insert(id)
+        }
+        return result
     }
 
     // The front app's frontmost window on the active space
