@@ -119,6 +119,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var updateTimer: Timer?
     private var lastActiveSpace: Int32 = 0  // Add this to track the last space
     private var currentNumber = 1
+    // The pre-Workit label, kept so settings carry over from earlier installs
     private let defaults = UserDefaults(suiteName: "com.workspace.monitor") ?? .standard
     private let colorMenu = NSMenu()
     private let sizeMenu = NSMenu()
@@ -157,6 +158,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Opening the app while it already runs (at login, or from Spotlight) must not add a second number
+        if let bundleID = Bundle.main.bundleIdentifier,
+           NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).contains(where: { $0 != .current }) {
+            NSApp.terminate(nil)
+            return
+        }
+
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         // Configure the status item
@@ -216,7 +224,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(fontItem)
 
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q"))
+        menu.addItem(NSMenuItem(title: "Quit Workit", action: #selector(quitApp), keyEquivalent: "q"))
         statusItem.menu = menu
         refreshMenu()
     }

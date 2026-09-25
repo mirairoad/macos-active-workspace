@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 #
-# Remove macOS Active Workspace.
+# Remove Workit.
 #
 #   curl -fsSL https://raw.githubusercontent.com/mirairoad/macos-active-workspace/main/uninstall.sh | bash
 #
-# Stops it and removes the binary and the LaunchAgent that starts it at login, including a copy
-# left by the old ~/.release installer. Your settings are left alone unless you
-# pass --purge.
+# Quits it and removes the app and the LaunchAgent that starts it at login, including anything
+# left by the older installers that put a bare binary in ~/.release/bin or ~/.local/bin. Your
+# settings are left alone unless you pass --purge.
 
 set -euo pipefail
 
 RAW="https://raw.githubusercontent.com/mirairoad/macos-active-workspace/main"
-PREFIX="$HOME/.local"
+DIR="$HOME/Applications"
 PURGE=0
 
 BOLD=$'\033[1m'; RED=$'\033[31m'; GREEN=$'\033[32m'; OFF=$'\033[0m'
@@ -20,48 +20,57 @@ die()  { printf '%s==>%s %s\n' "$RED" "$OFF" "$*" >&2; exit 1; }
 
 usage() {
 	cat <<EOF
-Remove macOS Active Workspace.
+Remove Workit.
 
 Usage: bash uninstall.sh [options]
        curl -fsSL $RAW/uninstall.sh | bash -s -- [options]
 
 Options:
-  --prefix <dir>   where install.sh put the binary (default: ~/.local)
-  --purge          also delete the saved settings
+  --dir <dir>   where install.sh put Workit.app (default: ~/Applications)
+  --purge       also delete the saved settings
   --help
 EOF
 }
 
 while [ $# -gt 0 ]; do
 	case "$1" in
-		--prefix)  PREFIX="${2:?--prefix needs a directory}"; shift 2 ;;
+		--dir)     DIR="${2:?--dir needs a directory}"; shift 2 ;;
 		--purge)   PURGE=1; shift ;;
 		--help|-h) usage; exit 0 ;;
 		*)         die "Unknown option: $1" ;;
 	esac
 done
 
-[ "$(uname -s)" = "Darwin" ] || die "This is a macOS menu bar app; there is nothing to remove here."
+[ "$(uname -s)" = "Darwin" ] || die "Workit is a macOS menu bar app; there is nothing to remove here."
 [ "$(id -u)" -ne 0 ] || die "Run this as yourself, not with sudo. The install lives in your home directory."
 
 # Must match install.sh
-LABEL="com.workspace.monitor"
-BIN="$PREFIX/bin/workspace_monitor"
+LABEL="com.mirairoad.workit"
+APP="$DIR/Workit.app"
 AGENT="$HOME/Library/LaunchAgents/$LABEL.plist"
-LEGACY_DIR="$HOME/.release"
 DOMAIN="gui/$(id -u)"
+LEGACY_LABEL="com.workspace.monitor"
+LEGACY_AGENT="$HOME/Library/LaunchAgents/$LEGACY_LABEL.plist"
+LEGACY_BINS=("$HOME/.release/bin/workspace_monitor" "$HOME/.local/bin/workspace_monitor")
 
-say "Removing macOS Active Workspace"
+say "Removing Workit"
 launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
-rm -fv "$BIN" "$AGENT" "$LEGACY_DIR/bin/workspace_monitor"
-rmdir "$LEGACY_DIR/bin" "$LEGACY_DIR" 2>/dev/null || true
+launchctl bootout "$DOMAIN/$LEGACY_LABEL" 2>/dev/null || true
+pkill -x Workit 2>/dev/null || true
+[ -d "$APP" ] && rm -rf "$APP" && echo "$APP"
+rm -fv "$AGENT" "$LEGACY_AGENT" "${LEGACY_BINS[@]}"
+rmdir "$HOME/.release/bin" "$HOME/.release" 2>/dev/null || true
 
+# Colors, size and font live under the old label, kept so settings survived the rename to Workit.
+# The app's own domain only holds what macOS saves for it, like the menu bar position.
 if [ "$PURGE" -eq 1 ]; then
-	defaults delete "$LABEL" 2>/dev/null || true
-	# defaults empties the file but leaves it behind
-	rm -f "$HOME/Library/Preferences/$LABEL.plist"
+	for domain in "$LEGACY_LABEL" "$LABEL"; do
+		defaults delete "$domain" 2>/dev/null || true
+		# defaults empties the file but leaves it behind
+		rm -f "$HOME/Library/Preferences/$domain.plist"
+	done
 	printf '%sDone.%s Settings deleted too.\n' "$GREEN$BOLD" "$OFF"
 else
 	printf '%sDone.%s Your settings were left alone.\n' "$GREEN$BOLD" "$OFF"
-	printf 'Delete them with: defaults delete %s\n' "$LABEL"
+	printf 'Delete them with: curl -fsSL %s/uninstall.sh | bash -s -- --purge\n' "$RAW"
 fi
