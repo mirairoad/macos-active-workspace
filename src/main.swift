@@ -37,9 +37,6 @@ private let CGSSpaceCopyName: (Int32, Int32) -> CFString? = {
 @_silgen_name("CGSCopyManagedDisplaySpaces") 
 public func CGSCopyManagedDisplaySpaces(_ connection: Int32) -> CFArray
 
-@_silgen_name("CGSCopyActiveMenuBarDisplayIdentifier")
-public func CGSCopyActiveMenuBarDisplayIdentifier(_ connection: Int32) -> CFString
-
 // Indicator appearance options, selectable from the status item menu
 private enum IndicatorColor: String, CaseIterable {
     case accent, transparent, gray, red, orange, yellow, green, blue, purple, pink
@@ -114,11 +111,39 @@ private enum TextSize: String, CaseIterable {
     }
 }
 
+// What one display is showing: its current desktop number, or "F" for a full-screen app
+private struct DisplayState {
+    let label: String
+    let isFocused: Bool
+}
+
+// One label in its box: as wide as it is tall, or wider when the label needs it
+private struct Label {
+    let text: NSAttributedString
+    let font: NSFont
+    let textWidth: CGFloat
+    let width: CGFloat
+
+    init(_ string: String, font: NSFont, color: NSColor, height: CGFloat, padding: CGFloat) {
+        self.font = font
+        text = NSAttributedString(string: string, attributes: [.font: font, .foregroundColor: color])
+        textWidth = ceil(text.size().width)
+        width = max(height, textWidth + padding)
+    }
+
+    func draw(in box: NSRect) {
+        // Center the digits (cap height), not the whole line box
+        let baseline = box.minY + (box.height - font.capHeight) / 2
+        text.draw(at: NSPoint(x: box.midX - textWidth / 2, y: baseline + font.descender))
+    }
+}
+
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var updateTimer: Timer?
     private var lastActiveSpace: Int32 = 0  // Add this to track the last space
-    private var currentNumber = 1
+    private var currentDisplays = [DisplayState(label: "1", isFocused: true)]
+    // The pre-Workit label, kept so settings carry over from earlier installs
     private let defaults = UserDefaults(suiteName: "com.workspace.monitor") ?? .standard
     private let colorMenu = NSMenu()
     private let sizeMenu = NSMenu()
@@ -126,6 +151,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let backgroundAlpha: CGFloat = 0.8
     private let cornerRadius: CGFloat = 3
     private let horizontalPadding: CGFloat = 6  // 3 points on each side
+    private let gap: CGFloat = 3  // Between the boxes of different displays
+    private let borderWidth: CGFloat = 1.25
 
     private var indicatorColor: IndicatorColor {
         get { setting("color", default: .accent) }
@@ -157,6 +184,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Opening the app while it already runs (at login, or from Spotlight) must not add a second number
+        if let bundleID = Bundle.main.bundleIdentifier,
+           NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).contains(where: { $0 != .current }) {
+            NSApp.terminate(nil)
+            return
+        }
+
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         // Configure the status item
@@ -164,7 +198,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.imagePosition = .imageOnly
 
         setupMenu()
-        updateButtonAppearance(number: 1)
+        redraw()
         updateWorkspaceInfo()
         setupNotifications()
 
@@ -216,7 +250,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(fontItem)
 
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q"))
+        menu.addItem(NSMenuItem(title: "Quit Workit", action: #selector(quitApp), keyEquivalent: "q"))
         statusItem.menu = menu
         refreshMenu()
     }
@@ -307,7 +341,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func settingsChanged() {
         refreshMenu()
-        updateButtonAppearance(number: currentNumber)
+        redraw()
     }
     
     private func setupNotifications() {
@@ -334,6 +368,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             )
         }
         
+        // Plugging a display in or out renumbers desktops without changing the active one
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(screensChanged),
+            name: NSApplication.didChangeScreenParametersNotification,
+            object: nil
+        )
+
         // Separate observer for accent color changes
         distributedCenter.addObserver(
             self,
@@ -343,38 +385,73 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
     
-    private func updateButtonAppearance(number: Int) {
-        guard let button = statusItem.button else { return }
-        currentNumber = number
-        button.image = indicatorImage(number: number)
+    private func updateButtonAppearance(displays: [DisplayState]) {
+        currentDisplays = displays
+        redraw()
+    }
+
+    private func redraw() {
+        statusItem.button?.image = indicatorImage(displays: currentDisplays)
     }
 
     // Draw at a fixed point size so the indicator looks the same on every display,
-    // instead of stretching to the menu bar height
-    private func indicatorImage(number: Int) -> NSImage {
-        let size = indicatorSize
+    // instead of stretching to the menu bar height.
+    //
+    // macOS draws a status item once and mirrors that image onto every display's menu bar, so
+    // each display cannot show its own desktop. Instead every display gets a box, main display
+    // first: the focused one filled, the others outlined. That reads the same on every menu bar.
+    private func indicatorImage(displays: [DisplayState]) -> NSImage {
         let fill = indicatorColor.fill
-        let height = min(size.height, NSStatusBar.system.thickness - 2)
+        let height = min(indicatorSize.height, NSStatusBar.system.thickness - 2)
         let font = indicatorFont.font(ofSize: round(height * textSize.scale), weight: isBold ? .bold : .regular)
-        // Template images only use alpha, so the color is irrelevant without a fill
-        let textColor = fill.map { contrastingTextColor(for: $0) } ?? .black
-        let text = NSAttributedString(string: "\(number)", attributes: [.font: font, .foregroundColor: textColor])
-        let textWidth = ceil(text.size().width)
-        let width = max(height, textWidth + horizontalPadding)
+        // Template images only use alpha, so black stands in for whatever the menu bar needs
+        let ink = fill ?? .black
+        let filledText = fill.map { contrastingTextColor(for: $0) } ?? .black
+        // With a single display there is nothing to tell apart, so it keeps the plain look
+        let showFocus = displays.count > 1
+        let boxes = displays.map { display -> (filled: Bool, label: Label) in
+            let filled = display.isFocused || !showFocus
+            let label = Label(display.label, font: font, color: filled ? filledText : ink,
+                              height: height, padding: horizontalPadding)
+            return (filled, label)
+        }
+        let width = boxes.map { $0.label.width }.reduce(0, +) + gap * CGFloat(max(boxes.count - 1, 0))
         let radius = cornerRadius
         let alpha = backgroundAlpha
+        let lineWidth = borderWidth
+        let spacing = gap
 
-        let image = NSImage(size: NSSize(width: width, height: height), flipped: false) { rect in
-            if let fill = fill {
-                fill.withAlphaComponent(alpha).setFill()
-                NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
+        let image = NSImage(size: NSSize(width: width, height: height), flipped: false) { _ in
+            var x: CGFloat = 0
+            for (filled, label) in boxes {
+                let box = NSRect(x: x, y: 0, width: label.width, height: height)
+                let shape = NSBezierPath(roundedRect: box, xRadius: radius, yRadius: radius)
+                if !filled {
+                    let border = NSBezierPath(roundedRect: box.insetBy(dx: lineWidth / 2, dy: lineWidth / 2),
+                                              xRadius: radius, yRadius: radius)
+                    border.lineWidth = lineWidth
+                    ink.setStroke()
+                    border.stroke()
+                    label.draw(in: box)
+                } else if let fill = fill {
+                    fill.withAlphaComponent(alpha).setFill()
+                    shape.fill()
+                    label.draw(in: box)
+                } else if showFocus {
+                    // Transparent: a solid box with the number cut out of it
+                    NSColor.black.setFill()
+                    shape.fill()
+                    NSGraphicsContext.current?.compositingOperation = .destinationOut
+                    label.draw(in: box)
+                    NSGraphicsContext.current?.compositingOperation = .sourceOver
+                } else {
+                    label.draw(in: box)
+                }
+                x += label.width + spacing
             }
-            // Center the digits (cap height), not the whole line box
-            let baseline = (rect.height - font.capHeight) / 2
-            text.draw(at: NSPoint(x: (rect.width - textWidth) / 2, y: baseline + font.descender))
             return true
         }
-        // Lets macOS tint the bare number for light and dark menu bars
+        // Lets macOS tint template drawing for light and dark menu bars
         image.isTemplate = fill == nil
         return image
     }
@@ -389,52 +466,35 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc internal func updateWorkspaceInfo() {
         let conn = _CGSDefaultConnection()
         let activeSpace = CGSGetActiveSpace(conn)
-        
-        // Only print if the space has changed
-        if activeSpace != lastActiveSpace {
-            let displays = CGSCopyManagedDisplaySpaces(conn) as! [NSDictionary]
-            let activeDisplay = CGSCopyActiveMenuBarDisplayIdentifier(conn) as String
-            let allSpaces: NSMutableArray = []
-            var activeSpaceID = -1
-            
-            // Find active space ID and collect non-fullscreen spaces
-            for display in displays {
-                guard
-                    let current = display["Current Space"] as? [String: Any],
-                    let spaces = display["Spaces"] as? [[String: Any]],
-                    let dispID = display["Display Identifier"] as? String
-                else {
-                    continue
-                }
-                
-                // Get active space ID from main/active display
-                if dispID == "Main" || dispID == activeDisplay {
-                    activeSpaceID = current["ManagedSpaceID"] as! Int
-                }
-                
-                // Collect only non-fullscreen spaces
-                for space in spaces {
-                    let isFullscreen = space["TileLayoutManager"] as? [String: Any] != nil
-                    if !isFullscreen {
-                        allSpaces.add(space)
-                    }
-                }
+        guard activeSpace != lastActiveSpace else { return }
+        lastActiveSpace = activeSpace
+
+        // Desktops are numbered per display, as Mission Control does, with displays in the order
+        // macOS lists them (main display first). Full-screen apps get spaces of their own, which
+        // are not desktops: they are skipped in the numbering and shown as "F".
+        let displays = CGSCopyManagedDisplaySpaces(conn) as! [NSDictionary]
+        let states = displays.compactMap { display -> DisplayState? in
+            guard let current = (display["Current Space"] as? [String: Any])?["ManagedSpaceID"] as? Int,
+                  let spaces = display["Spaces"] as? [[String: Any]] else { return nil }
+            let desktops = spaces.filter { $0["TileLayoutManager"] == nil }
+            let index = desktops.firstIndex { ($0["ManagedSpaceID"] as? Int) == current }
+            return DisplayState(label: index.map { "\($0 + 1)" } ?? "F", isFocused: current == Int(activeSpace))
+        }
+        guard !states.isEmpty else { return }
+
+        print("Desktops: " + states.map { $0.isFocused ? "[\($0.label)]" : $0.label }.joined(separator: " "))
+        DispatchQueue.main.async { [weak self] in
+            self?.updateButtonAppearance(displays: states)
+        }
+    }
+
+    // Spaces can settle a moment after the notification, so look again shortly after
+    @objc private func screensChanged() {
+        for delay in [0.0, 1.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.lastActiveSpace = 0
+                self?.updateWorkspaceInfo()
             }
-            
-            // Find and update space number
-            for (index, space) in allSpaces.enumerated() {
-                let spaceID = (space as! NSDictionary)["ManagedSpaceID"] as! Int
-                if spaceID == activeSpaceID {
-                    let spaceNumber = index + 1
-                    print("Switched to Space Number: \(spaceNumber)")
-                    DispatchQueue.main.async { [weak self] in
-                        self?.updateButtonAppearance(number: spaceNumber)
-                    }
-                    break
-                }
-            }
-            
-            lastActiveSpace = activeSpace
         }
     }
     
@@ -447,7 +507,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self = self else { return }
             // Accent swatch and indicator both depend on the system accent color
             self.refreshMenu()
-            self.updateButtonAppearance(number: self.currentNumber)
+            self.redraw()
         }
     }
 }
