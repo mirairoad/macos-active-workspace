@@ -21,7 +21,7 @@ APP="$OUT/$NAME.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-xcrun swiftc -O -o "$APP/Contents/MacOS/$NAME" "$ROOT/src/main.swift" -framework AppKit
+xcrun swiftc -O -o "$APP/Contents/MacOS/$NAME" "$ROOT"/src/*.swift -framework AppKit
 cp "$ROOT/assets/AppIcon.icns" "$APP/Contents/Resources/"
 
 # LSUIElement keeps it out of the Dock and the app switcher: it lives in the menu bar only
