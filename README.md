@@ -7,35 +7,65 @@ A lightweight menubar utility that displays your current macOS workspace number 
 ## Features
 - Shows current workspace number in the menu bar
 - Automatically matches your system accent color
+- Pick a color (accent, transparent, gray, red, orange, yellow, green, blue, purple, pink) size (small, medium, large) and font (typeface, text size, bold) from the menu bar item
 - Updates instantly when switching spaces
 - Minimal resource usage
 - Native macOS look and feel
 
-## Quick Installation
+## Installing
 
-1. Make the install script executable:
+```sh
+curl -fsSL https://raw.githubusercontent.com/mirairoad/macos-active-workspace/main/install.sh | bash
+```
 
-chmod +x ./install.sh
+That fetches the source, builds it, installs the binary to `~/.local/bin` and a
+LaunchAgent that starts it at every login, and starts it. Everything goes in your
+home directory, so it never asks for `sudo`. Running it again updates to the
+latest version, and an install from the old `~/.release` script is moved over.
 
-2. Run the installer:
+If you would rather read a script before running it - and you should - fetch it
+first:
 
-./install.sh
+```sh
+curl -fsSLO https://raw.githubusercontent.com/mirairoad/macos-active-workspace/main/install.sh
+less install.sh && bash install.sh
+```
 
-This will:
-- Compile the application
-- Install it to ~/.release/bin
-- Set up and load the LaunchAgent
+It builds from source rather than downloading a binary, and that is deliberate.
+There is no signed, notarized build to download, and a binary fetched through a
+browser gets quarantined and refused by Gatekeeper. Built on your Mac, it never
+carries the quarantine flag and is compiled for your CPU.
 
-## Uninstallation
+The only build dependency is the Swift compiler from Apple's Command Line Tools.
+The script checks for it first and, if it is missing, prints the one command that
+installs it (`xcode-select --install`). It will not run it for you: a script
+piped from the internet is the last thing that should be making that decision
+quietly.
 
-To remove the application:
+Options go after `bash -s --` when piping, or straight after `bash install.sh`:
+`--ref <tag|branch>` to build something other than `main`, `--prefix <dir>` to
+put the binary somewhere other than `~/.local`, `--source <dir>` to build a
+local checkout instead of fetching, and `--skip-deps`.
 
-# Unload the LaunchAgent
-launchctl unload ~/Library/LaunchAgents/com.workspace.monitor.plist
+## Customization
 
-# Remove the files
-rm ~/Library/LaunchAgents/com.workspace.monitor.plist
-rm ~/.release/bin/workspace_monitor
+Click the workspace number in the menu bar:
+- **Color**: accent (default), transparent (number only, adapts to light/dark menu bar) or a fixed color
+- **Size**: small, medium or large (default)
+- **Font**: typeface (system, rounded, monospaced or serif), text size (small, medium or large, relative to the box) and bold
+
+Settings are saved and restored on restart.
+
+## Uninstalling
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mirairoad/macos-active-workspace/main/uninstall.sh | bash
+```
+
+That stops it and removes the binary and the LaunchAgent, including a copy left
+by the old `~/.release` installer. Your settings are left alone;
+pass `--purge` (`| bash -s -- --purge`) to delete them too. If you installed with
+`--prefix`, pass the same `--prefix` here.
 
 ## Development
 
@@ -44,8 +74,8 @@ The application is built using Swift and AppKit. Main components:
 - Workspace monitoring
 - Dynamic updates
 
-## Manual Installation
+Build and run it without installing:
 
-For advanced users who prefer manual installation, see the individual scripts:
-- `compile.sh` - Compiles the application
-- `create_agent.sh` - Creates and loads the LaunchAgent
+```sh
+swiftc -O -o workspace_monitor src/main.swift -framework AppKit && ./workspace_monitor
+```
