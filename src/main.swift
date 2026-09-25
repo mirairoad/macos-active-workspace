@@ -37,9 +37,6 @@ private let CGSSpaceCopyName: (Int32, Int32) -> CFString? = {
 @_silgen_name("CGSCopyManagedDisplaySpaces") 
 public func CGSCopyManagedDisplaySpaces(_ connection: Int32) -> CFArray
 
-@_silgen_name("CGSCopyActiveMenuBarDisplayIdentifier")
-public func CGSCopyActiveMenuBarDisplayIdentifier(_ connection: Int32) -> CFString
-
 // Indicator appearance options, selectable from the status item menu
 private enum IndicatorColor: String, CaseIterable {
     case accent, transparent, gray, red, orange, yellow, green, blue, purple, pink
@@ -114,11 +111,33 @@ private enum TextSize: String, CaseIterable {
     }
 }
 
+// One number in its box: as wide as it is tall, or wider when the number needs it
+private struct Label {
+    let text: NSAttributedString
+    let font: NSFont
+    let textWidth: CGFloat
+    let width: CGFloat
+
+    init(_ number: Int, font: NSFont, color: NSColor, height: CGFloat, padding: CGFloat) {
+        self.font = font
+        text = NSAttributedString(string: "\(number)", attributes: [.font: font, .foregroundColor: color])
+        textWidth = ceil(text.size().width)
+        width = max(height, textWidth + padding)
+    }
+
+    func draw(in box: NSRect) {
+        // Center the digits (cap height), not the whole line box
+        let baseline = box.minY + (box.height - font.capHeight) / 2
+        text.draw(at: NSPoint(x: box.midX - textWidth / 2, y: baseline + font.descender))
+    }
+}
+
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var updateTimer: Timer?
     private var lastActiveSpace: Int32 = 0  // Add this to track the last space
-    private var currentNumber = 1
+    private var currentDesktop = 1
+    private var currentMonitor: Int?  // Only set when more than one display has its own desktops
     // The pre-Workit label, kept so settings carry over from earlier installs
     private let defaults = UserDefaults(suiteName: "com.workspace.monitor") ?? .standard
     private let colorMenu = NSMenu()
@@ -127,6 +146,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let backgroundAlpha: CGFloat = 0.8
     private let cornerRadius: CGFloat = 3
     private let horizontalPadding: CGFloat = 6  // 3 points on each side
+    private let gap: CGFloat = 3  // Between the display number and the desktop number
+    private let borderWidth: CGFloat = 1.25
 
     private var indicatorColor: IndicatorColor {
         get { setting("color", default: .accent) }
@@ -172,7 +193,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.imagePosition = .imageOnly
 
         setupMenu()
-        updateButtonAppearance(number: 1)
+        redraw()
         updateWorkspaceInfo()
         setupNotifications()
 
@@ -315,7 +336,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func settingsChanged() {
         refreshMenu()
-        updateButtonAppearance(number: currentNumber)
+        redraw()
     }
     
     private func setupNotifications() {
@@ -342,6 +363,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             )
         }
         
+        // Plugging a display in or out renumbers desktops without changing the active one
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(screensChanged),
+            name: NSApplication.didChangeScreenParametersNotification,
+            object: nil
+        )
+
         // Separate observer for accent color changes
         distributedCenter.addObserver(
             self,
@@ -351,38 +380,53 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
     
-    private func updateButtonAppearance(number: Int) {
-        guard let button = statusItem.button else { return }
-        currentNumber = number
-        button.image = indicatorImage(number: number)
+    private func updateButtonAppearance(desktop: Int, monitor: Int?) {
+        currentDesktop = desktop
+        currentMonitor = monitor
+        redraw()
+    }
+
+    private func redraw() {
+        statusItem.button?.image = indicatorImage(desktop: currentDesktop, monitor: currentMonitor)
     }
 
     // Draw at a fixed point size so the indicator looks the same on every display,
     // instead of stretching to the menu bar height
-    private func indicatorImage(number: Int) -> NSImage {
-        let size = indicatorSize
+    private func indicatorImage(desktop: Int, monitor: Int?) -> NSImage {
         let fill = indicatorColor.fill
-        let height = min(size.height, NSStatusBar.system.thickness - 2)
+        let height = min(indicatorSize.height, NSStatusBar.system.thickness - 2)
         let font = indicatorFont.font(ofSize: round(height * textSize.scale), weight: isBold ? .bold : .regular)
-        // Template images only use alpha, so the color is irrelevant without a fill
-        let textColor = fill.map { contrastingTextColor(for: $0) } ?? .black
-        let text = NSAttributedString(string: "\(number)", attributes: [.font: font, .foregroundColor: textColor])
-        let textWidth = ceil(text.size().width)
-        let width = max(height, textWidth + horizontalPadding)
+        // Template images only use alpha, so black stands in for whatever the menu bar needs
+        let ink = fill ?? .black
+        let desktopLabel = Label(desktop, font: font, color: fill.map { contrastingTextColor(for: $0) } ?? .black,
+                                 height: height, padding: horizontalPadding)
+        let monitorLabel = monitor.map { Label($0, font: font, color: ink, height: height, padding: horizontalPadding) }
+        let desktopX = monitorLabel.map { $0.width + gap } ?? 0
         let radius = cornerRadius
         let alpha = backgroundAlpha
+        let lineWidth = borderWidth
 
-        let image = NSImage(size: NSSize(width: width, height: height), flipped: false) { rect in
+        let size = NSSize(width: desktopX + desktopLabel.width, height: height)
+        let image = NSImage(size: size, flipped: false) { _ in
+            // The display number is outlined rather than filled, so it reads as the secondary one
+            if let monitorLabel = monitorLabel {
+                let box = NSRect(x: 0, y: 0, width: monitorLabel.width, height: height)
+                let border = NSBezierPath(roundedRect: box.insetBy(dx: lineWidth / 2, dy: lineWidth / 2),
+                                          xRadius: radius, yRadius: radius)
+                border.lineWidth = lineWidth
+                ink.setStroke()
+                border.stroke()
+                monitorLabel.draw(in: box)
+            }
+            let box = NSRect(x: desktopX, y: 0, width: desktopLabel.width, height: height)
             if let fill = fill {
                 fill.withAlphaComponent(alpha).setFill()
-                NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
+                NSBezierPath(roundedRect: box, xRadius: radius, yRadius: radius).fill()
             }
-            // Center the digits (cap height), not the whole line box
-            let baseline = (rect.height - font.capHeight) / 2
-            text.draw(at: NSPoint(x: (rect.width - textWidth) / 2, y: baseline + font.descender))
+            desktopLabel.draw(in: box)
             return true
         }
-        // Lets macOS tint the bare number for light and dark menu bars
+        // Lets macOS tint a bare number and outline for light and dark menu bars
         image.isTemplate = fill == nil
         return image
     }
@@ -397,52 +441,37 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc internal func updateWorkspaceInfo() {
         let conn = _CGSDefaultConnection()
         let activeSpace = CGSGetActiveSpace(conn)
-        
-        // Only print if the space has changed
-        if activeSpace != lastActiveSpace {
-            let displays = CGSCopyManagedDisplaySpaces(conn) as! [NSDictionary]
-            let activeDisplay = CGSCopyActiveMenuBarDisplayIdentifier(conn) as String
-            let allSpaces: NSMutableArray = []
-            var activeSpaceID = -1
-            
-            // Find active space ID and collect non-fullscreen spaces
-            for display in displays {
-                guard
-                    let current = display["Current Space"] as? [String: Any],
-                    let spaces = display["Spaces"] as? [[String: Any]],
-                    let dispID = display["Display Identifier"] as? String
-                else {
-                    continue
-                }
-                
-                // Get active space ID from main/active display
-                if dispID == "Main" || dispID == activeDisplay {
-                    activeSpaceID = current["ManagedSpaceID"] as! Int
-                }
-                
-                // Collect only non-fullscreen spaces
-                for space in spaces {
-                    let isFullscreen = space["TileLayoutManager"] as? [String: Any] != nil
-                    if !isFullscreen {
-                        allSpaces.add(space)
-                    }
-                }
+        guard activeSpace != lastActiveSpace else { return }
+        lastActiveSpace = activeSpace
+
+        let displays = CGSCopyManagedDisplaySpaces(conn) as! [NSDictionary]
+        // Desktops are numbered per display, as Mission Control does, with displays in the order
+        // macOS lists them (main display first). Full-screen apps get spaces of their own, which
+        // are not desktops and are skipped.
+        for (displayIndex, display) in displays.enumerated() {
+            guard let spaces = display["Spaces"] as? [[String: Any]] else { continue }
+            let desktops = spaces.filter { $0["TileLayoutManager"] == nil }
+            guard let index = desktops.firstIndex(where: { ($0["ManagedSpaceID"] as? Int) == Int(activeSpace) }) else {
+                continue
             }
-            
-            // Find and update space number
-            for (index, space) in allSpaces.enumerated() {
-                let spaceID = (space as! NSDictionary)["ManagedSpaceID"] as! Int
-                if spaceID == activeSpaceID {
-                    let spaceNumber = index + 1
-                    print("Switched to Space Number: \(spaceNumber)")
-                    DispatchQueue.main.async { [weak self] in
-                        self?.updateButtonAppearance(number: spaceNumber)
-                    }
-                    break
-                }
+
+            // A single list means one display, or displays sharing Spaces: nothing to tell apart
+            let monitor = displays.count > 1 ? displayIndex + 1 : nil
+            print("Switched to Space Number: \(index + 1) on display \(displayIndex + 1)")
+            DispatchQueue.main.async { [weak self] in
+                self?.updateButtonAppearance(desktop: index + 1, monitor: monitor)
             }
-            
-            lastActiveSpace = activeSpace
+            return
+        }
+    }
+
+    // Spaces can settle a moment after the notification, so look again shortly after
+    @objc private func screensChanged() {
+        for delay in [0.0, 1.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.lastActiveSpace = 0
+                self?.updateWorkspaceInfo()
+            }
         }
     }
     
@@ -455,7 +484,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self = self else { return }
             // Accent swatch and indicator both depend on the system accent color
             self.refreshMenu()
-            self.updateButtonAppearance(number: self.currentNumber)
+            self.redraw()
         }
     }
 }
