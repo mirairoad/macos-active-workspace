@@ -148,6 +148,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let colorMenu = NSMenu()
     private let sizeMenu = NSMenu()
     private let fontMenu = NSMenu()
+    private let borderMenu = NSMenu()
     private let backgroundAlpha: CGFloat = 0.8
     private let cornerRadius: CGFloat = 3
     private let horizontalPadding: CGFloat = 6  // 3 points on each side
@@ -179,6 +180,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         set { defaults.set(newValue, forKey: "bold") }
     }
 
+    // Around the focused window, in points; 0 is off
+    private var windowBorderWidth: Int {
+        get { min(max(defaults.integer(forKey: "borderWidth"), 0), 5) }
+        set { defaults.set(newValue, forKey: "borderWidth") }
+    }
+
     private func setting<T: RawRepresentable>(_ key: String, default fallback: T) -> T where T.RawValue == String {
         return defaults.string(forKey: key).flatMap(T.init(rawValue:)) ?? fallback
     }
@@ -199,6 +206,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         setupMenu()
         redraw()
+        applyBorder()
         updateWorkspaceInfo()
         setupNotifications()
 
@@ -249,6 +257,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         fontItem.submenu = fontMenu
         menu.addItem(fontItem)
 
+        // Needs private window server functions; left out if this macOS lacks them
+        if WindowBorder.isAvailable {
+            borderMenu.addItem(optionItem(title: "Off", value: "0", action: #selector(selectBorderWidth(_:))))
+            borderMenu.addItem(.separator())
+            for width in 1...5 {
+                borderMenu.addItem(optionItem(title: "\(width) px", value: "\(width)", action: #selector(selectBorderWidth(_:))))
+            }
+            let borderItem = NSMenuItem(title: "Window Border", action: nil, keyEquivalent: "")
+            borderItem.submenu = borderMenu
+            menu.addItem(borderItem)
+        }
+
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit Workit", action: #selector(quitApp), keyEquivalent: "q"))
         statusItem.menu = menu
@@ -289,6 +309,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             } else if item.action == #selector(toggleBold(_:)) {
                 item.state = isBold ? .on : .off
             }
+        }
+        for item in borderMenu.items {
+            item.state = (item.representedObject as? String) == "\(windowBorderWidth)" ? .on : .off
         }
     }
 
@@ -339,9 +362,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         settingsChanged()
     }
 
+    @objc private func selectBorderWidth(_ sender: NSMenuItem) {
+        guard let value = sender.representedObject as? String, let width = Int(value) else { return }
+        windowBorderWidth = width
+        settingsChanged()
+    }
+
     private func settingsChanged() {
         refreshMenu()
         redraw()
+        applyBorder()
+    }
+
+    // The border takes the indicator's color, so the two match; with a transparent indicator,
+    // the color of text in the current appearance
+    private func applyBorder() {
+        let border = WindowBorder.shared
+        border.color = indicatorColor.fill ?? .labelColor
+        border.width = CGFloat(windowBorderWidth)
     }
     
     private func setupNotifications() {
@@ -376,13 +414,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil
         )
 
-        // Separate observer for accent color changes
-        distributedCenter.addObserver(
-            self,
-            selector: #selector(updateAccentColor),
-            name: NSNotification.Name("AppleColorPreferencesChangedNotification"),
-            object: nil
-        )
+        // Separate observers for accent color and light/dark changes, which dynamic colors follow
+        for name in ["AppleColorPreferencesChangedNotification", "AppleInterfaceThemeChangedNotification"] {
+            distributedCenter.addObserver(
+                self,
+                selector: #selector(updateAccentColor),
+                name: NSNotification.Name(name),
+                object: nil
+            )
+        }
     }
     
     private func updateButtonAppearance(displays: [DisplayState]) {
@@ -505,9 +545,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func updateAccentColor() {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            // Accent swatch and indicator both depend on the system accent color
+            // Accent swatch, indicator and border all depend on the system accent color
             self.refreshMenu()
             self.redraw()
+            self.applyBorder()
         }
     }
 }

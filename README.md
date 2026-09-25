@@ -11,6 +11,7 @@ rounded square that matches your accent color, or any color you pick.
 - With more than one display, shows each display's desktop, numbered per display and main display first. The focused display's box is filled, the others are outlined, and every menu bar shows the same thing (macOS mirrors one menu bar item onto all of them)
 - Pick a color (accent, transparent, gray, red, orange, yellow, green, blue, purple, pink), size (small, medium, large) and font (typeface, text size, bold) from its menu
 - The same size on every display, whatever the menu bar height
+- An optional border around the focused window, in the same color as the indicator
 - Menu bar only: no Dock icon, minimal resource usage
 
 ## Installing
@@ -55,6 +56,7 @@ Click the number in the menu bar:
 - **Color**: accent (default), transparent (number only, adapts to light/dark menu bar) or a fixed color
 - **Size**: small, medium or large (default)
 - **Font**: typeface (system, rounded, monospaced or serif), text size (small, medium or large, relative to the box) and bold
+- **Window Border**: off (default) or 1 to 5 px around the focused window, in the indicator's color (with a transparent indicator, white or black to match light or dark mode). It follows the window as it moves, resizes and changes desktop, and needs no extra permissions
 - **Quit Workit**: closes it until you open it again or next log in
 
 Settings are saved and restored on restart. To bring it back after quitting, open
@@ -73,8 +75,10 @@ the same `--dir` here.
 
 ## Development
 
-Workit is a single Swift file, `src/main.swift`, built with AppKit. Build the app
-and run it without installing:
+Workit is built with AppKit: `src/main.swift` is the menu bar indicator and
+`src/WindowBorder.swift` the window border. The border and the desktop numbers use
+private window server (SkyLight) functions, the same ones yabai and JankyBorders
+use; everything else is public API. Build the app and run it without installing:
 
 ```sh
 bash scripts/build-app.sh && open build/Workit.app
