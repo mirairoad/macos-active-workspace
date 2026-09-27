@@ -24,6 +24,7 @@ private enum SkyLight {
     static let requestNotificationsForWindows = load("SLSRequestNotificationsForWindows", (@convention(c) (Int32, UnsafePointer<UInt32>?, Int32) -> CGError).self)
     static let getActiveSpace = load("CGSGetActiveSpace", (@convention(c) (Int32) -> UInt64).self)
     static let copySpacesForWindows = load("SLSCopySpacesForWindows", (@convention(c) (Int32, Int32, CFArray) -> Unmanaged<CFArray>?).self)
+    static let spaceGetType = load("SLSSpaceGetType", (@convention(c) (Int32, UInt64) -> Int32).self)
     static let getWindowBounds = load("SLSGetWindowBounds", (@convention(c) (Int32, UInt32, UnsafeMutablePointer<CGRect>) -> CGError).self)
     static let windowIsOrderedIn = load("SLSWindowIsOrderedIn", (@convention(c) (Int32, UInt32, UnsafeMutablePointer<Bool>) -> CGError).self)
 
@@ -71,7 +72,7 @@ private enum SkyLight {
             transactionCreate, transactionCommit, transactionMoveWindowWithGroup, transactionOrderWindow,
             transactionSetWindowLevel, windowQueryWindows, windowQueryResultCopyWindows, windowIteratorAdvance,
             windowIteratorGetLevel, windowIteratorGetWindowID, windowIteratorGetParentID, windowIteratorGetTags,
-            windowIteratorGetAttributes,
+            windowIteratorGetAttributes, spaceGetType,
         ]
         return required.allSatisfy { $0 != nil }
     }
@@ -235,14 +236,27 @@ final class WindowBorder {
         }
         register()
 
-        let listed = normalWindowsOnScreen()
+        let onScreen = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        // Mission Control and its kin set every window aside but the border, which would be left
+        // on top of them where the window was. Nothing says when they close, so keep looking.
+        if systemOverlayIsShown(in: onScreen) {
+            hide()
+            target = 0
+            scheduleFocusCheck(after: 0.1)
+            return
+        }
+
+        let listed = normalWindows(in: onScreen)
         let topLevel = topLevelWindows(among: listed.map { $0.id })
         let windows = listed.filter { topLevel.contains($0.id) }
         // Asking for notifications on every visible window, not just the focused one, is what
         // reveals focus moving between two windows of the same app
         watch(windows.map { $0.id })
 
-        guard let focused = focusedWindow(among: windows) else {
+        // A window in full screen has the display to itself; around a video, the border would
+        // show in the black bands
+        guard let focused = focusedWindow(among: windows), let focusedSpace = spaceOf(focused),
+              !isFullScreen(focusedSpace) else {
             hide()
             target = 0
             return
@@ -253,7 +267,7 @@ final class WindowBorder {
             readTargetDetails()
             needsRedraw = true
         }
-        targetSpace = spaceOf(target)
+        targetSpace = focusedSpace
         update()
     }
 
@@ -263,11 +277,9 @@ final class WindowBorder {
     }
 
     // Front to back, as the window server lists them
-    private func normalWindowsOnScreen() -> [ListedWindow] {
-        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
-        let info = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] ?? []
+    private func normalWindows(in onScreen: [[String: Any]]) -> [ListedWindow] {
         let ownPID = getpid()
-        return info.compactMap { window in
+        return onScreen.compactMap { window in
             guard (window[kCGWindowLayer as String] as? Int) == 0,
                   let id = window[kCGWindowNumber as String] as? UInt32,
                   let pid = window[kCGWindowOwnerPID as String] as? pid_t, pid != ownPID,
@@ -301,6 +313,33 @@ final class WindowBorder {
             result.insert(id)
         }
         return result
+    }
+
+    // Mission Control, App Exposé and Show Desktop each cover the display with a window of the
+    // Dock's or WindowManager's, just below the Dock's own level. The Dock itself is a window that
+    // size too, at its own level, whenever it shows.
+    private func systemOverlayIsShown(in onScreen: [[String: Any]]) -> Bool {
+        let owners = Set(NSWorkspace.shared.runningApplications
+            .filter { ["com.apple.dock", "com.apple.WindowManager"].contains($0.bundleIdentifier) }
+            .map { $0.processIdentifier })
+        let dockLevel = Int(CGWindowLevelForKey(.dockWindow))
+        var displayCount: UInt32 = 0
+        var displays = [CGDirectDisplayID](repeating: 0, count: 16)
+        _ = CGGetActiveDisplayList(UInt32(displays.count), &displays, &displayCount)
+        let displayBounds = displays.prefix(Int(displayCount)).map { CGDisplayBounds($0) }
+
+        return onScreen.contains { window in
+            guard let pid = window[kCGWindowOwnerPID as String] as? pid_t, owners.contains(pid),
+                  let layer = window[kCGWindowLayer as String] as? Int, layer > 0, layer < dockLevel,
+                  let boundsInfo = window[kCGWindowBounds as String] as? NSDictionary,
+                  let bounds = CGRect(dictionaryRepresentation: boundsInfo) else { return false }
+            return displayBounds.contains { bounds.contains($0) }
+        }
+    }
+
+    // 4: a space the system made for one window in full screen
+    private func isFullScreen(_ space: UInt64) -> Bool {
+        SkyLight.spaceGetType?(mainConnection, space) == 4
     }
 
     // The front app's frontmost window on the active space
